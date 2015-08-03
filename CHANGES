@@ -1,3 +1,7 @@
+-- 1.11 released --
+
+Support for coloring and clusters.
+
 -- 1.10 released --
 
 Support the RTL function comment syntax of gcc 4.4.0

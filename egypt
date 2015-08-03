@@ -6,8 +6,14 @@ egypt - create call graph from gcc RTL dump
 
 =head1 SYNOPISIS
 
- egypt [--omit function,function,...] [--include-external] <rtl-file>... | dotty -
- egypt [--omit function,function,...] [--include-external] <rtl-file>... | dot <dot-options>
+ egypt [--omit function,function,...] [--include-external] [--show-clusters] 
+       [--highlight-main] [--highlight-exit] 
+       [--highlights function:bg_color:outgoing_color:incoming_color,...] 
+       <rtl-file>... | dotty -
+ egypt [--omit function,function,...] [--include-external] [--show-clusters] 
+       [--highlight-main] [--highlight-exit] 
+       [--highlights function:bg_color:outgoing_color:incoming_color,...] 
+        <rtl-file>... | dot <dot-options>
 
 =head1 DESCRIPTION
 
@@ -29,6 +35,31 @@ considered external if it is not defined in any of the input files.
 For example, functions in the standard C library are external.  Only
 direct function calls will be displayed; there is no way to display
 the action of taking the address of an external function.
+
+=item show-clusters
+
+Outputs functions in clusters based on a source RTL file being parsed.
+
+=item highlight-main
+
+Highlights main() function using builtin style.
+
+=item highlight-exit
+
+Highlights exit() function using builtin style.
+
+=item highlights
+
+Use custom highlighting for given functions. Function definition is:
+    
+    function:background_color:color_of_outgoing_arrow:color_of_incoming_arrow
+   
+Example:
+    
+    someFunction:lightcyan:navyblue:indigo,main:crimson:tomato:
+
+Multiple definitions may be given separated by commas. Available color values
+may be found at http://www.graphviz.org/Documentation/dotguide.pdf
 
 =back
 
@@ -156,7 +187,8 @@ L<gcc>, L<dotty>, L<dot>, L<neato>
 
 =head1 COPYRIGHT
 
-Copyright 1994-2011 Andreas Gustafsson
+Copyright 1994-2015 Andreas Gustafsson, 2015 Sergey Vasilenko
+
 
 This program is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
@@ -164,6 +196,7 @@ modify it under the same terms as Perl itself.
 =head1 AUTHOR
 
 Andreas Gustafsson
+Sergey Vasilenko
 
 =cut
 
@@ -172,7 +205,7 @@ use Getopt::Long;
 
 use vars qw($VERSION);
 
-$VERSION = "1.10";
+$VERSION = "1.11";
 
 # A data structure containing information about potential function
 # calls.  This is a reference to a hash table where the key is a
@@ -196,6 +229,30 @@ my $curfunc;
 my @omit = ();
 my $include_external = 0;
 
+# A list of clusters
+my $clusters = { };
+my $show_clusters = 0;
+
+# Highlights
+my @highlights = ();
+my $highlight_main = 0;
+my $highlight_exit = 0;
+
+# Mapping from function names to dot style descriptions
+my $function_styles = {
+    'main' => 'style=filled, fillcolor=green',
+    'exit' => 'style=filled, fillcolor=red'
+};
+# Mapping from caller function names to dot style descriptions for outgoing
+my $function_caller_styles = {
+    'main' => 'color=darkgreen',
+};
+# Mapping from callee function names to dot style descriptions for incoming
+my $function_callee_styles = {
+    'exit' => 'color=crimson'
+};
+my $functions_using_styles = { };
+
 # Mapping from symbol reference types to dot styles
 my $styles = {
     call => 'solid',
@@ -207,36 +264,69 @@ sub demangle {
     $name = $demangle->{$name} || $name;
     # Escape embedded quotes
     $name =~ s/\"/\\\"/g;
+
     return $name;
 }
 
-GetOptions('omit=s' => \@omit,
-	   'include-external' => \$include_external);
+GetOptions(
+    'omit=s' => \@omit,
+    'include-external' => \$include_external,
+    'show-clusters' => \$show_clusters,
+    'highlight-main' => \$highlight_main,
+    'highlight-exit' => \$highlight_exit,
+    'highlights=s' => \@highlights
+);
+
+# Store zeros to enable their highlighting
+if ($highlight_main) { $functions_using_styles->{'main'} = 0; }
+if ($highlight_exit) { $functions_using_styles->{'exit'} = 0; }
 
 @omit = split(/,/, join(',', @omit));
+@highlights = split(/,/, join(',', @highlights));
+
+# Parse cusom highlighting
+foreach my $highlight (@highlights) {
+    if ($highlight =~ m/^(.+):(.*):(.*):(.*)$/) {
+        my $function_to_highlight = $1;
+        my $background = $2;
+        my $outgoing = $3;
+        my $incoming = $4;
+
+        if (!($function_to_highlight eq '')) {
+            $functions_using_styles->{$function_to_highlight} = 0;
+            
+            if (!($background eq '')) { $function_styles->{$function_to_highlight} = 'style=filled, fillcolor=' . $background; }
+            if (!($outgoing eq '')) { $function_caller_styles->{$function_to_highlight} = 'color=' . $outgoing; }
+            if (!($incoming eq '')) { $function_callee_styles->{$function_to_highlight} = 'color=' . $incoming; }
+        }        
+    }
+}
 
 sub enter_func {
-    my ($funcname) = @_;
+    my ($funcname) = $_[0];
+    my ($clustername) = $_[1];
     $curfunc = $funcname;
     $calls->{$curfunc} = { } if ! exists($calls->{$curfunc});
+    $clusters->{$clustername}->{$funcname} = { };
 }
 
 while (<>) {
     chomp;
     if (/^;; Function (\S+)\s*$/) {
-	# pre-gcc4 style
-	enter_func($1);
+        # pre-gcc4 style
+        enter_func($1, $ARGV);
     } elsif (/^;; Function (.*)\s+\((\S+)(,.*)?\).*$/) {
-	# gcc4 style
-	# Compiling for ARM, it can look like ";; Function foo (foo)[0:3]"	
-	enter_func($2);
-	$demangle->{$curfunc} = $1;
-	$calls->{$curfunc} = { } if ! exists($calls->{$curfunc});
+        # gcc4 style
+        # Compiling for ARM, it can look like ";; Function foo (foo)[0:3]"	
+        enter_func($2, $ARGV);
+        $demangle->{$curfunc} = $1;
+        $calls->{$curfunc} = { } if ! exists($calls->{$curfunc});
     }
+
     if (/^.*\(call.*"(.*)".*$/) {
-	$calls->{$curfunc}->{$1} = 'call';
+        $calls->{$curfunc}->{$1} = 'call';
     } elsif (/^.*\(symbol_ref.*"(.*)".*$/) {
-	$calls->{$curfunc}->{$1} = 'ref';
+        $calls->{$curfunc}->{$1} = 'ref';
     }
 }
 
@@ -249,28 +339,69 @@ my %unconnected = map { ($_, undef) } keys %{$calls};
 
 print "digraph callgraph {\n";
 
+# Clusters
+if ($show_clusters) {
+    foreach my $cluster (keys %{$clusters}) {
+        print "subgraph \"cluster_$cluster\" {\n";    
+        print "style=filled; fillcolor=lightgrey;\n";
+        print "node [style=filled, fillcolor=white];\n";
+        print "label=\"$cluster\"; \n";    
+        foreach my $cluster_function (keys %{$clusters->{$cluster}}) {
+            my $cluster_function_d = demangle($cluster_function);
+            print "\"$cluster_function_d\";";
+        }    
+        print "}\n";
+    }
+}
+
+# Call graph
 foreach my $caller (keys %{$calls}) {
     my $caller_d = demangle($caller);
     foreach my $callee (keys %{$calls->{$caller}}) {
-	my $reftype = $calls->{$caller}->{$callee};
-	# ARM short calls are flagged with a caret prefix; ignore it
-	$callee =~ s/^\^+//;
-	# If the referenced symbol is not a defined function
-	# or a direct call to an external function, ignore it.
-	next unless exists($calls->{$callee}) or
-	    $include_external and $reftype eq 'call'
-	        and ! exists $omit_map{$callee};
-	my $style = $styles->{$reftype};
-	my $callee_d = demangle($callee);
-	print "\"$caller_d\" -> \"$callee_d\" [style=$style];\n";
-	delete $unconnected{$caller};
-	delete $unconnected{$callee};
+        my $reftype = $calls->{$caller}->{$callee};
+        # ARM short calls are flagged with a caret prefix; ignore it
+        $callee =~ s/^\^+//;
+        # If the referenced symbol is not a defined function
+        # or a direct call to an external function, ignore it.
+        next unless exists($calls->{$callee}) or
+            $include_external and $reftype eq 'call'
+                and ! exists $omit_map{$callee};
+        my $style = $styles->{$reftype};
+        my $callee_d = demangle($callee);
+
+        if (exists($functions_using_styles->{$caller_d})) { 
+            $functions_using_styles->{$caller_d}++; 
+            if (exists($function_caller_styles->{$caller_d})) {
+                $style = $style . ',' . $function_caller_styles->{$caller_d};
+            }
+        }
+
+        if (exists($functions_using_styles->{$callee_d})) { 
+            $functions_using_styles->{$callee_d}++; 
+            if (exists($function_callee_styles->{$callee_d})) {
+                $style = $style . ',' . $function_callee_styles->{$callee_d};
+            }
+        }
+
+        print "\"$caller_d\" -> \"$callee_d\" [style=$style];\n";
+        delete $unconnected{$caller};
+        delete $unconnected{$callee};
     }
 }
 
 foreach my $f (keys %unconnected) {
     my $f_d = demangle($f);
+    if (exists($functions_using_styles->{$f_d})) { $functions_using_styles->{$f_d}++; }
     print "\"$f_d\";\n";
+}
+
+# Custom highlighting rules for nodes
+foreach my $styled (keys %{$functions_using_styles}) {
+    if ($functions_using_styles->{$styled} > 0) {
+        my $style = $function_styles->{$styled};
+
+        print "\"$styled\" [$style];\n";
+    }
 }
 
 print "}\n";
